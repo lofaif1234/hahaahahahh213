@@ -255,6 +255,33 @@ local function webhook(title, desc, color, with_scr)
 end
 
 -- ── Package helpers ───────────────────────────────────────────
+local function DISMISS_POPUPS()
+    local tmp = NOKA .. "/ui_dump.xml"
+    sexec("uiautomator dump " .. tmp)
+    local raw = read_file(tmp)
+    if raw then
+        for _, kw in ipairs({ "Play", "Resume", "Join", "OK", "Continue" }) do
+            local bounds = raw:match('text="' .. kw .. '".-bounds="([^"]+)"') 
+                        or raw:match('content%-desc="[^"]*' .. kw .. '[^"]*".-bounds="([^"]+)"')
+            if bounds then
+                local x1, y1, x2, y2 = bounds:match("(%d+),(%d+)%D+(%d+),(%d+)")
+                if x1 then
+                    local cx = math.floor((tonumber(x1) + tonumber(x2)) / 2)
+                    local cy = math.floor((tonumber(y1) + tonumber(y2)) / 2)
+                    sexec(string.format("input tap %d %d", cx, cy))
+                    return true
+                end
+            end
+        end
+    end
+    -- Fallback blind taps for common button locations
+    for _, pos in ipairs({ "540,1200", "540,1100", "540,960" }) do 
+        sexec("input tap " .. pos:gsub(",", " "))
+        sleep(1)
+    end
+    return false
+end
+
 local function RESOLVE_LINK(url)
     -- 1. If it's already an HTTPS share link, keep it as-is (Roblox handles these best)
     if url:match("^https?://") then
@@ -295,15 +322,39 @@ end
 local function launch(pkg, raw_url)
     local deep_link = RESOLVE_LINK(raw_url)
     
-    -- Preferred activity for starting Roblox on rooted devices
-    local activity = "com.roblox.client.ActivityProtocolLaunch"
-    
-    -- Build the root command
-    local cmd = string.format('am start -n %s/%s -a android.intent.action.VIEW -d "%s"', pkg, activity, deep_link)
-    
     if IS_ROOT then
-        os.execute("su -c '" .. cmd .. "'")
+        -- 1. Aggressive cleaning
+        sexec("am force-stop " .. pkg)
+        sexec("rm -rf /data/data/" .. pkg .. "/cache/*")
+        
+        -- 2. Try preferred activities
+        local acts = { 
+            "com.roblox.client.ActivityProtocolLaunch", 
+            "com.roblox.client.startup.ActivitySplash", 
+            "com.roblox.client.ActivityProtocol" 
+        }
+        
+        local ok = false
+        for _, act in ipairs(acts) do
+            -- Windowing mode 5 = Freeform
+            local cmd = string.format('am start -n %s/%s -a android.intent.action.VIEW -d "%s" --windowingMode 5', pkg, act, deep_link)
+            local res = sexec(cmd)
+            if not res:lower():match("error") then
+                ok = true; break
+            end
+        end
+        
+        -- Fallback to generic intent if specific ones failed
+        if not ok then
+            sexec(string.format('am start -a android.intent.action.VIEW -d "%s" -p %s', deep_link, pkg))
+        end
+        
+        -- 3. Automation transition
+        sleep(8)
+        DISMISS_POPUPS()
     else
+        -- Non-root fallback (limited)
+        local cmd = string.format('am start -a android.intent.action.VIEW -d "%s" -p %s', deep_link, pkg)
         os.execute(cmd .. " > /dev/null 2>&1")
     end
 end
